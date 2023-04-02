@@ -9,7 +9,7 @@ import copy
 
 class mmdetection3dDataModule(pl.LightningDataModule):
 
-    def __init__(self, config_file: str, batch_size: int = 8, num_workers=8):
+    def __init__(self, config_file: str, batch_size: int = 2, num_workers=8):
         super().__init__()
         self.cfg = Config.fromfile(config_file)
         self.batch_size = batch_size
@@ -33,9 +33,10 @@ class mmdetection3dDataModule(pl.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
             shuffle=True,
             drop_last=True,
-            pin_memory=False,
+            pin_memory=True,
             collate_fn=partial(collate, samples_per_gpu=self.batch_size))
         return data_loader
 
@@ -44,23 +45,24 @@ class mmdetection3dDataModule(pl.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
             shuffle=False,
             drop_last=True,
-            pin_memory=False,
+            pin_memory=True,
             collate_fn=partial(collate, samples_per_gpu=self.batch_size))
         return data_loader
 
     def test_dataloader(self):
-        data_loader = torch.utils.data.DataLoader(self.val_dataset,
-                                                  batch_size=1,
-                                                  num_workers=self.num_workers,
-                                                  shuffle=False,
-                                                  drop_last=False,
-                                                  pin_memory=False,
-                                                  collate_fn=partial(
-                                                      collate,
-                                                      samples_per_gpu=1))
+        data_loader = torch.utils.data.DataLoader(
+            self.val_dataset,
+            batch_size=1,
+            num_workers=self.num_workers,
+            persistent_workers=self.num_workers > 0,
+            shuffle=False,
+            drop_last=False,
+            pin_memory=True,
+            collate_fn=partial(collate, samples_per_gpu=1))
         return data_loader
 
 
-__all__ = [mmdetection3dDataModule]
+__all__ = ["mmdetection3dDataModule"]

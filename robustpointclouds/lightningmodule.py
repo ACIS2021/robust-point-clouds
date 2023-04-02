@@ -7,7 +7,8 @@ from mmdet3d.models import build_model
 from mmcv.runner import load_checkpoint
 from mmdet3d.datasets import build_dataset
 import torch
-from pytorch_lightning.callbacks import ModelCheckpoint, GPUStatsMonitor
+import tensorflow as tf
+from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from mmdet3d.apis.inference import inference_detector
 
@@ -61,13 +62,11 @@ class mmdetection3dLightningModule(pl.LightningModule):
 
     def configure_callbacks(self):
         callbacks = [
-            ModelCheckpoint(save_top_k=-1,
-                            save_last=True,
-                            filename='{epoch}-{val_loss:.6f}'),
+            ModelCheckpoint(save_last=True, filename='{epoch}-{val_loss:.6f}'),
         ]
 
         try:
-            callbacks.append(GPUStatsMonitor())
+            callbacks.append(DeviceStatsMonitor())
         except MisconfigurationException:
             pass
         return callbacks
@@ -110,19 +109,27 @@ class mmdetection3dLightningModule(pl.LightningModule):
             del data["gt_bboxes_3d"]
 
         results = self.model(return_loss=return_loss, **data)
-
         return results
 
     def training_step(self, batch, batch_idx):
-        results = self(batch, return_loss=True)
-        perturbation_norm = results.pop("perturbation_norm")
-        perturbation_bias = results.pop("perturbation_bias")
-        perturbation_imbalance = results.pop("perturbation_imbalance")
+        result = self(batch, return_loss=True)
+        if type(result) is tuple:
+            losses, perturbation = result
+        else:
+            losses = result
+            perturbation = None
 
-        losses = []
-        for loss_type, loss in results.items():
-            losses += loss
-        model_loss = torch.sum(torch.stack(losses))
+        perturbation_norm = losses.pop("perturbation_norm")
+        perturbation_bias = losses.pop("perturbation_bias")
+        perturbation_imbalance = losses.pop("perturbation_imbalance")
+
+        loss_values = []
+        for _, loss in losses.items():
+            loss_values += loss
+            # loss_values.append(loss)
+            if len(loss_values) == 3:
+                break
+        model_loss = torch.sum(torch.stack(loss_values))
 
         self.log_dict(
             {
@@ -133,21 +140,44 @@ class mmdetection3dLightningModule(pl.LightningModule):
             },
             prog_bar=True,
             on_step=True,
-            on_epoch=False)
-
-        return -model_loss + perturbation_norm * self.hparams.perturbation_norm_regularizer + perturbation_bias * self.hparams.perturbation_bias_regularizer + perturbation_imbalance * self.hparams.perturbation_imbalance_regularizer
+            on_epoch=False,
+            batch_size=self.trainer.datamodule.batch_size)
+        loss = -model_loss
+        loss += (perturbation_norm * self.hparams.perturbation_norm_regularizer)
+        loss += (perturbation_bias * self.hparams.perturbation_bias_regularizer)
+        loss += (perturbation_imbalance *
+                 self.hparams.perturbation_imbalance_regularizer)
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        results = self(batch, return_loss=True)
-        perturbation_norm = results.pop("perturbation_norm")
-        perturbation_bias = results.pop("perturbation_bias")
-        perturbation_imbalance = results.pop("perturbation_imbalance")
-        losses = []
-        for loss_type, loss in results.items():
-            losses += loss
-        model_loss = torch.sum(torch.stack(losses))
+        result = self(batch, return_loss=True)
+        if type(result) is tuple:
+            losses, perturbation = result
+        else:
+            losses = result
+            perturbation = None
 
-        val_loss = -model_loss + perturbation_norm * self.hparams.perturbation_norm_regularizer + perturbation_bias * self.hparams.perturbation_bias_regularizer + perturbation_imbalance * self.hparams.perturbation_imbalance_regularizer
+        perturbation_norm = losses.pop("perturbation_norm")
+        perturbation_bias = losses.pop("perturbation_bias")
+        perturbation_imbalance = losses.pop("perturbation_imbalance")
+        loss_values = []
+        for loss_type, loss in losses.items():
+            # if tf.rank(loss) != 0:
+            # import pdb
+            # pdb.set_trace()
+            loss_values += loss
+            # loss_values.append(loss)
+            if len(loss_values) == 3:
+                break
+        model_loss = torch.sum(torch.stack(loss_values))
+
+        val_loss = -model_loss
+        val_loss += (perturbation_norm *
+                     self.hparams.perturbation_norm_regularizer)
+        val_loss += (perturbation_bias *
+                     self.hparams.perturbation_bias_regularizer)
+        val_loss += (perturbation_imbalance *
+                     self.hparams.perturbation_imbalance_regularizer)
 
         self.log_dict({
             "val_model_loss": model_loss,
@@ -155,7 +185,8 @@ class mmdetection3dLightningModule(pl.LightningModule):
         },
                       prog_bar=True,
                       on_step=False,
-                      on_epoch=True)
+                      on_epoch=True,
+                      batch_size=self.trainer.datamodule.batch_size)
 
     def test_step(self, batch, batch_idx):
         with torch.no_grad():
@@ -171,4 +202,4 @@ class mmdetection3dLightningModule(pl.LightningModule):
         return inference_detector(self.model, filename)
 
 
-__all__ = [mmdetection3dLightningModule]
+__all__ = ["mmdetection3dLightningModule"]
