@@ -3,11 +3,13 @@ channels:
   - pytorch
   - conda-forge
 dependencies:
-  - python=3.7
-  - cudatoolkit=11.1
-  - git
+  - python=3.8
+  - cudatoolkit=11.6
+  - pytorch==1.12.1
+  - torchvision==0.13.1
+  - torchaudio==0.12.1
+  - opencv
   - pip
-  - pytorch
-  - torchvision
-  - torchaudio
   - shapely
+  - pip:
+    - -r requirements.txt

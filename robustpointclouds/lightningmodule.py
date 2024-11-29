@@ -1,16 +1,11 @@
 import pytorch_lightning as pl
-from mmcv import Config
-from mmdet import __version__ as mmdet_version
-from mmdet3d import __version__ as mmdet3d_version
-from mmseg import __version__ as mmseg_version
-from mmdet3d.models import build_model
-from mmcv.runner import load_checkpoint
-from mmdet3d.datasets import build_dataset
+from mmengine.config import Config
+from mmengine.runner import load_checkpoint
+from mmdet3d.registry import MODELS
 import torch
-from pytorch_lightning.callbacks import ModelCheckpoint, GPUStatsMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, DeviceStatsMonitor
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from mmdet3d.apis.inference import inference_detector
-
 
 class mmdetection3dLightningModule(pl.LightningModule):
 
@@ -27,20 +22,7 @@ class mmdetection3dLightningModule(pl.LightningModule):
 
         self.cfg = Config.fromfile(config_file)
 
-        self.dataset = build_dataset(self.cfg.data.train)
-
-        self.cfg.checkpoint_config.meta = dict(
-            mmdet_version=mmdet_version,
-            mmseg_version=mmseg_version,
-            mmdet3d_version=mmdet3d_version,
-            config=self.cfg.pretty_text,
-            CLASSES=self.dataset.CLASSES,
-            PALETTE=self.dataset.PALETTE  # for segmentors
-            if hasattr(self.dataset, 'PALETTE') else None)
-
-        self.model = build_model(self.cfg.model,
-                                 train_cfg=self.cfg.get('train_cfg'),
-                                 test_cfg=self.cfg.get('test_cfg'))
+        self.model = MODELS.build(self.cfg.model)
 
         self.model.cfg = self.cfg
 
@@ -61,13 +43,11 @@ class mmdetection3dLightningModule(pl.LightningModule):
 
     def configure_callbacks(self):
         callbacks = [
-            ModelCheckpoint(save_top_k=-1,
-                            save_last=True,
-                            filename='{epoch}-{val_loss:.6f}'),
+            ModelCheckpoint(save_last=True, filename='{epoch}-{val_loss:.6f}'),
         ]
 
         try:
-            callbacks.append(GPUStatsMonitor())
+            callbacks.append(DeviceStatsMonitor())
         except MisconfigurationException:
             pass
         return callbacks
@@ -81,15 +61,26 @@ class mmdetection3dLightningModule(pl.LightningModule):
 
     def forward(self, sample, return_loss=False):
 
+        import pdb
+        pdb.set_trace()
+        
+        det3d_data_sample = sample['data_samples'][0]
+        
+
+        # Extracting necessary fields
         data = {
-            "points": sample["points"].data[0],
-            "img_metas": sample["img_metas"].data[0],
-            "gt_labels_3d": sample["gt_labels_3d"].data[0],
-            "gt_bboxes_3d": sample["gt_bboxes_3d"].data[0]
+            #"points": det3d_data_sample.lidar2img,      # this is of type list
+            "points": sample["inputs"]["points"][0],    # points is most likely this as it is type 'torch.Tensor
+            "img_metas": det3d_data_sample.metainfo,    # type dict  
+            "gt_labels_3d": det3d_data_sample.eval_ann_info['gt_labels_3d'],    # type numpy.ndarray
+            "gt_bboxes_3d": det3d_data_sample.eval_ann_info['gt_bboxes_3d']    # type mmdet3d.structures.bbox_3d.lidar_box3d.LiDARInstance3DBoxes    
         }
 
-        for i in data["img_metas"]:
-            i["pcd_rotation"] = i["pcd_rotation"].clone().to(self.device)
+
+        # Modified this as the img_metas from metainfo is dict not list of dictionaries 
+        if isinstance(data["img_metas"], dict) and "pcd_rotation" in data["img_metas"]:
+            data["img_metas"]["pcd_rotation"] = data["img_metas"]["pcd_rotation"].clone().to(self.device)
+
 
         for idx_i, i in enumerate(data["points"]):
             data["points"][idx_i] = i.clone().to(self.device)
@@ -110,19 +101,24 @@ class mmdetection3dLightningModule(pl.LightningModule):
             del data["gt_bboxes_3d"]
 
         results = self.model(return_loss=return_loss, **data)
-
         return results
 
     def training_step(self, batch, batch_idx):
-        results = self(batch, return_loss=True)
-        perturbation_norm = results.pop("perturbation_norm")
-        perturbation_bias = results.pop("perturbation_bias")
-        perturbation_imbalance = results.pop("perturbation_imbalance")
+        result = self(batch, return_loss=True)
+        if type(result) is tuple:
+            losses, perturbation = result
+        else:
+            losses = result
+            perturbation = None
 
-        losses = []
-        for loss_type, loss in results.items():
-            losses += loss
-        model_loss = torch.sum(torch.stack(losses))
+        perturbation_norm = losses.pop("perturbation_norm")
+        perturbation_bias = losses.pop("perturbation_bias")
+        perturbation_imbalance = losses.pop("perturbation_imbalance")
+
+        loss_values = []
+        for _, loss in losses.items():
+            loss_values += loss
+        model_loss = torch.sum(torch.stack(loss_values))
 
         self.log_dict(
             {
@@ -133,21 +129,38 @@ class mmdetection3dLightningModule(pl.LightningModule):
             },
             prog_bar=True,
             on_step=True,
-            on_epoch=False)
-
-        return -model_loss + perturbation_norm * self.hparams.perturbation_norm_regularizer + perturbation_bias * self.hparams.perturbation_bias_regularizer + perturbation_imbalance * self.hparams.perturbation_imbalance_regularizer
+            on_epoch=False,
+            batch_size=self.trainer.datamodule.batch_size)
+        loss = -model_loss
+        loss += (perturbation_norm * self.hparams.perturbation_norm_regularizer)
+        loss += (perturbation_bias * self.hparams.perturbation_bias_regularizer)
+        loss += (perturbation_imbalance *
+                 self.hparams.perturbation_imbalance_regularizer)
+        return loss
 
     def validation_step(self, batch, batch_idx):
-        results = self(batch, return_loss=True)
-        perturbation_norm = results.pop("perturbation_norm")
-        perturbation_bias = results.pop("perturbation_bias")
-        perturbation_imbalance = results.pop("perturbation_imbalance")
-        losses = []
-        for loss_type, loss in results.items():
-            losses += loss
-        model_loss = torch.sum(torch.stack(losses))
+        result = self(batch, return_loss=True)
+        if type(result) is tuple:
+            losses, perturbation = result
+        else:
+            losses = result
+            perturbation = None
 
-        val_loss = -model_loss + perturbation_norm * self.hparams.perturbation_norm_regularizer + perturbation_bias * self.hparams.perturbation_bias_regularizer + perturbation_imbalance * self.hparams.perturbation_imbalance_regularizer
+        perturbation_norm = losses.pop("perturbation_norm")
+        perturbation_bias = losses.pop("perturbation_bias")
+        perturbation_imbalance = losses.pop("perturbation_imbalance")
+        loss_values = []
+        for loss_type, loss in losses.items():
+            loss_values += loss
+        model_loss = torch.sum(torch.stack(loss_values))
+
+        val_loss = -model_loss
+        val_loss += (perturbation_norm *
+                     self.hparams.perturbation_norm_regularizer)
+        val_loss += (perturbation_bias *
+                     self.hparams.perturbation_bias_regularizer)
+        val_loss += (perturbation_imbalance *
+                     self.hparams.perturbation_imbalance_regularizer)
 
         self.log_dict({
             "val_model_loss": model_loss,
@@ -155,7 +168,8 @@ class mmdetection3dLightningModule(pl.LightningModule):
         },
                       prog_bar=True,
                       on_step=False,
-                      on_epoch=True)
+                      on_epoch=True,
+                      batch_size=self.trainer.datamodule.batch_size)
 
     def test_step(self, batch, batch_idx):
         with torch.no_grad():
@@ -171,4 +185,4 @@ class mmdetection3dLightningModule(pl.LightningModule):
         return inference_detector(self.model, filename)
 
 
-__all__ = [mmdetection3dLightningModule]
+__all__ = ["mmdetection3dLightningModule"]

@@ -1,13 +1,11 @@
 from robustpointclouds.lightningmodule import mmdetection3dLightningModule
 from robustpointclouds.datamodule import mmdetection3dDataModule
-from pytorch_lightning.utilities.cli import LightningCLI
+from pytorch_lightning.cli import LightningCLI
 from pytorch_lightning.utilities.cli import SaveConfigCallback
 from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.trainer.trainer import Trainer
 import os
 import sys
-from robustpointclouds.models.detectors.adversarial_voxel_net import AdversarialVoxelNet as _
-from robustpointclouds.models.adversaries.voxel_perturber import VoxelPerturber as _
 
 
 class MySaveConfigCallback(SaveConfigCallback):
@@ -28,19 +26,11 @@ class MyLightningCLI(LightningCLI):
 
 
 if __name__ == "__main__":
-    cli = MyLightningCLI(
-        mmdetection3dLightningModule,
-        mmdetection3dDataModule,
-        seed_everything_default=42,
-        trainer_defaults={
-            "gpus":
-                -1,
-            "deterministic":
-                True,
-            "max_epochs":
-                sys.maxsize,
-            "accelerator":
-                "ddp" if sys.platform in ["linux", "linux2"] else None,
-            "sync_batchnorm":
-                True,
-        })
+    cli = MyLightningCLI(mmdetection3dLightningModule,
+                         mmdetection3dDataModule,
+                         seed_everything_default=42,
+                         trainer_defaults={
+                             "accelerator": "gpu",
+                             "devices": 1,
+                             "max_epochs": sys.maxsize
+                         })
